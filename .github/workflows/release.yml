@@ -25,6 +25,9 @@ jobs:
 
       - run: npm ci
 
+      - name: Bundle Ollama binary
+        run: node scripts/fetch-ollama.mjs
+
       - run: npm run build
 
       - name: Build and publish installers

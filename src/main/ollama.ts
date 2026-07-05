@@ -1,5 +1,7 @@
-import { spawn, execFile } from 'child_process'
+import { spawn, execFile, ChildProcess } from 'child_process'
 import { existsSync } from 'fs'
+import { join } from 'path'
+import { app } from 'electron'
 
 export const OLLAMA_URL = 'http://127.0.0.1:11434'
 
@@ -14,6 +16,8 @@ const KNOWN_PATHS = [
 
 export type OllamaStatus = 'running' | 'started' | 'not-installed' | 'failed-to-start'
 
+let spawned: ChildProcess | null = null
+
 async function isServerUp(): Promise<boolean> {
   try {
     const res = await fetch(`${OLLAMA_URL}/api/version`, {
@@ -25,7 +29,17 @@ async function isServerUp(): Promise<boolean> {
   }
 }
 
-function findBinary(): string | null {
+// The binary we ship inside the app (resources/ollama/<platform>/ in dev,
+// process.resourcesPath/ollama/ when packaged). Not present on Linux.
+function bundledBinary(): string | null {
+  const exe = process.platform === 'win32' ? 'ollama.exe' : 'ollama'
+  const p = app.isPackaged
+    ? join(process.resourcesPath, 'ollama', exe)
+    : join(app.getAppPath(), 'resources', 'ollama', process.platform, exe)
+  return existsSync(p) ? p : null
+}
+
+function systemBinary(): string | null {
   for (const p of KNOWN_PATHS) {
     if (existsSync(p)) return p
   }
@@ -41,15 +55,23 @@ function binaryOnPath(): Promise<string | null> {
 export async function ensureOllama(): Promise<OllamaStatus> {
   if (await isServerUp()) return 'running'
 
-  const bin = findBinary() ?? (await binaryOnPath())
+  const bin = bundledBinary() ?? systemBinary() ?? (await binaryOnPath())
   if (!bin) return 'not-installed'
 
-  const child = spawn(bin, ['serve'], { detached: true, stdio: 'ignore' })
-  child.unref()
+  spawned = spawn(bin, ['serve'], { stdio: 'ignore' })
+  spawned.on('exit', () => {
+    spawned = null
+  })
 
   for (let i = 0; i < 20; i++) {
     await new Promise((r) => setTimeout(r, 500))
     if (await isServerUp()) return 'started'
   }
   return 'failed-to-start'
+}
+
+// Only stops a server this app started — never a user's own Ollama.
+export function stopOllama(): void {
+  spawned?.kill()
+  spawned = null
 }

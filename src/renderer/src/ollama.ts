@@ -5,6 +5,15 @@ export interface ChatMessage {
   content: string
 }
 
+export interface GenStats {
+  tokensPerSec: number
+  tokens: number
+}
+
+export interface UiMessage extends ChatMessage {
+  stats?: GenStats
+}
+
 export interface ModelInfo {
   name: string
   size: number
@@ -47,7 +56,8 @@ export async function listModels(): Promise<ModelInfo[]> {
 export async function* streamChat(
   model: string,
   messages: ChatMessage[],
-  signal: AbortSignal
+  signal: AbortSignal,
+  onStats?: (stats: GenStats) => void
 ): AsyncGenerator<string> {
   const res = await fetch(`${BASE}/api/chat`, {
     method: 'POST',
@@ -58,7 +68,15 @@ export async function* streamChat(
   for await (const chunk of ndjson(res)) {
     if (chunk.error) throw new Error(chunk.error)
     if (chunk.message?.content) yield chunk.message.content
-    if (chunk.done) return
+    if (chunk.done) {
+      if (chunk.eval_count && chunk.eval_duration) {
+        onStats?.({
+          tokens: chunk.eval_count,
+          tokensPerSec: chunk.eval_count / (chunk.eval_duration / 1e9)
+        })
+      }
+      return
+    }
   }
 }
 

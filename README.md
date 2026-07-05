@@ -1,18 +1,19 @@
 # Local Inference
 
-A desktop app for running AI models locally. Electron + React on the front, [Ollama](https://ollama.com) as the inference engine — all inference happens on your machine, nothing leaves it.
+A desktop app for running AI models locally — download, open, pick a model, chat. Electron + React on the front, a bundled [Ollama](https://ollama.com) engine (MIT licensed) inside — all inference happens on your machine, nothing leaves it.
 
 ## How it works
 
-- On launch, the app checks for an Ollama server at `localhost:11434`. If Ollama is installed but not running, the app starts `ollama serve` itself. If it isn't installed, you get a download link.
-- The sidebar lists installed models, lets you pull new ones (with download progress) and delete old ones.
-- Chat responses stream token-by-token from Ollama's `/api/chat` endpoint.
+- The Ollama server binary ships **inside the app** (fetched at build time by `scripts/fetch-ollama.mjs`, bundled via electron-builder `extraResources`). On launch the app starts it automatically; if you already run your own Ollama, the app uses that instead and shares its models. On Linux (no standalone Ollama build) it falls back to a system install.
+- First run shows a guided model picker: curated models with plain-English descriptions and RAM-aware fit badges ("Runs great" / "Will be slow" / "Won't fit") computed from your machine's memory, with one-click downloads.
+- Chats render markdown, persist across restarts, and show tokens/sec after each reply. Responses stream token-by-token from Ollama's `/api/chat` endpoint.
 
 ## Development
 
 ```sh
 npm install
-npm run dev        # launches Electron with hot reload
+npm run fetch-ollama   # one-time: download the engine binary to resources/
+npm run dev            # launches Electron with hot reload
 ```
 
 ## Download & install
@@ -25,7 +26,7 @@ Grab the latest installer from [Releases](https://github.com/Fractal-Machine-Res
 > xattr -cr "/Applications/Local Inference.app"
 > ```
 
-You'll also need [Ollama](https://ollama.com/download) installed — the app will prompt you if it's missing.
+No other installs needed — the inference engine is bundled. (Linux only: install [Ollama](https://ollama.com/download) separately.)
 
 ## Releasing a new version
 

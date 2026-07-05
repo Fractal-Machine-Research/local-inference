@@ -1,40 +1,60 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
-  ChatMessage,
   ModelInfo,
   PullProgress,
+  UiMessage,
   deleteModel,
   formatBytes,
   listModels,
   pullModel,
   streamChat
 } from './ollama'
+import { Conversation, loadConversations, saveConversations } from './storage'
+import ModelPicker from './components/ModelPicker'
+import MessageView from './components/MessageView'
 
 type AppStatus = 'checking' | 'ready' | 'not-installed' | 'failed-to-start'
 
+const STARTERS = [
+  'Explain how running an AI model locally works',
+  'Write a haiku about being offline',
+  'Help me plan a weekend coding project'
+]
+
 export default function App() {
   const [status, setStatus] = useState<AppStatus>('checking')
+  const [sysMemGB, setSysMemGB] = useState(16)
   const [models, setModels] = useState<ModelInfo[]>([])
   const [selectedModel, setSelectedModel] = useState('')
-  const [messages, setMessages] = useState<ChatMessage[]>([])
+  const [convs, setConvs] = useState<Conversation[]>(() => loadConversations())
+  const [activeId, setActiveId] = useState<string | null>(null)
   const [input, setInput] = useState('')
   const [streaming, setStreaming] = useState(false)
   const [error, setError] = useState('')
+  const [pulling, setPulling] = useState<{ tag: string; progress: PullProgress } | null>(null)
+  const [showPicker, setShowPicker] = useState(false)
   const [pullName, setPullName] = useState('')
-  const [pull, setPull] = useState<PullProgress | null>(null)
   const abortRef = useRef<AbortController | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
+
+  const active = convs.find((c) => c.id === activeId) ?? null
+  const messages = active?.messages ?? []
+
+  useEffect(() => saveConversations(convs), [convs])
 
   const refreshModels = useCallback(async () => {
     const list = await listModels()
     setModels(list)
     setSelectedModel((cur) => (cur && list.some((m) => m.name === cur) ? cur : (list[0]?.name ?? '')))
+    return list
   }, [])
 
   const connect = useCallback(async () => {
     setStatus('checking')
     setError('')
     try {
+      const info = await window.api.systemInfo()
+      setSysMemGB(info.totalMemGB)
       const result = await window.api.ensureOllama()
       if (result === 'running' || result === 'started') {
         await refreshModels()
@@ -54,25 +74,35 @@ export default function App() {
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight })
-  }, [messages])
+  }, [convs, streaming])
 
-  async function send() {
-    const text = input.trim()
-    if (!text || !selectedModel || streaming) return
-    setError('')
-    setInput('')
-    const history: ChatMessage[] = [...messages, { role: 'user', content: text }]
-    setMessages([...history, { role: 'assistant', content: '' }])
+  function updateConv(id: string, update: (c: Conversation) => Conversation) {
+    setConvs((cur) => cur.map((c) => (c.id === id ? update(c) : c)))
+  }
+
+  async function generate(convId: string, history: UiMessage[], model: string) {
+    updateConv(convId, (c) => ({
+      ...c,
+      messages: [...history, { role: 'assistant', content: '' }],
+      updatedAt: Date.now()
+    }))
     setStreaming(true)
+    setError('')
     const controller = new AbortController()
     abortRef.current = controller
     try {
-      for await (const token of streamChat(selectedModel, history, controller.signal)) {
-        setMessages((cur) => {
-          const next = [...cur]
-          const last = next[next.length - 1]
-          next[next.length - 1] = { ...last, content: last.content + token }
-          return next
+      for await (const token of streamChat(model, history, controller.signal, (stats) => {
+        updateConv(convId, (c) => {
+          const msgs = [...c.messages]
+          msgs[msgs.length - 1] = { ...msgs[msgs.length - 1], stats }
+          return { ...c, messages: msgs }
+        })
+      })) {
+        updateConv(convId, (c) => {
+          const msgs = [...c.messages]
+          const last = msgs[msgs.length - 1]
+          msgs[msgs.length - 1] = { ...last, content: last.content + token }
+          return { ...c, messages: msgs, updatedAt: Date.now() }
         })
       }
     } catch (e) {
@@ -83,22 +113,55 @@ export default function App() {
     }
   }
 
-  async function doPull() {
-    const name = pullName.trim()
-    if (!name || pull) return
-    setError('')
-    const controller = new AbortController()
-    abortRef.current = controller
-    try {
-      for await (const progress of pullModel(name, controller.signal)) {
-        setPull(progress)
+  async function send(textOverride?: string) {
+    const text = (textOverride ?? input).trim()
+    if (!text || !selectedModel || streaming) return
+    setInput('')
+    let convId = activeId
+    let history: UiMessage[]
+    if (!convId || !convs.some((c) => c.id === convId)) {
+      convId = crypto.randomUUID()
+      history = [{ role: 'user', content: text }]
+      const conv: Conversation = {
+        id: convId,
+        title: text.length > 44 ? text.slice(0, 44) + '…' : text,
+        model: selectedModel,
+        messages: history,
+        updatedAt: Date.now()
       }
+      setConvs((cur) => [conv, ...cur])
+      setActiveId(convId)
+    } else {
+      history = [...messages, { role: 'user', content: text }]
+    }
+    await generate(convId, history, selectedModel)
+  }
+
+  async function regenerate() {
+    if (!active || streaming) return
+    const history = [...active.messages]
+    while (history.length && history[history.length - 1].role === 'assistant') history.pop()
+    if (!history.length) return
+    await generate(active.id, history, selectedModel)
+  }
+
+  async function doPull(tag: string) {
+    if (!tag || pulling) return
+    setError('')
+    setPulling({ tag, progress: { status: 'starting' } })
+    const controller = new AbortController()
+    try {
+      for await (const progress of pullModel(tag, controller.signal)) {
+        setPulling({ tag, progress })
+      }
+      const list = await refreshModels()
+      const pulled = list.find((m) => m.name.startsWith(tag))
+      if (pulled) setSelectedModel(pulled.name)
       setPullName('')
-      await refreshModels()
     } catch (e) {
       if ((e as Error).name !== 'AbortError') setError(String(e))
     } finally {
-      setPull(null)
+      setPulling(null)
     }
   }
 
@@ -113,24 +176,22 @@ export default function App() {
   }
 
   if (status === 'checking') {
-    return <div className="center-screen">Connecting to Ollama…</div>
+    return <div className="center-screen">Starting local AI engine…</div>
   }
 
   if (status === 'not-installed' || status === 'failed-to-start') {
     return (
       <div className="center-screen">
         <div className="setup-card">
-          <h2>{status === 'not-installed' ? 'Ollama is not installed' : 'Could not start Ollama'}</h2>
+          <h2>Couldn&apos;t start the AI engine</h2>
           <p>
-            This app uses Ollama to run models locally.{' '}
-            {status === 'not-installed'
-              ? 'Install it, then try again.'
-              : 'Try launching the Ollama app manually, then retry.'}
+            The bundled engine failed to launch. Installing Ollama separately also works — the
+            app will find it.
           </p>
           {error && <p className="error">{error}</p>}
           <div className="row">
             <button onClick={() => window.api.openExternal('https://ollama.com/download')}>
-              Download Ollama
+              Get Ollama
             </button>
             <button onClick={connect}>Retry</button>
           </div>
@@ -139,17 +200,57 @@ export default function App() {
     )
   }
 
-  const pullPct =
-    pull?.total && pull.completed ? Math.round((pull.completed / pull.total) * 100) : null
+  // First run: engine is up but no models yet — one guided decision.
+  if (models.length === 0) {
+    return (
+      <div className="onboarding">
+        <h1>Pick a model to get started</h1>
+        <p className="muted">
+          Everything runs on this machine ({sysMemGB} GB memory) — nothing leaves it. You can
+          add more models later.
+        </p>
+        <ModelPicker
+          totalMemGB={sysMemGB}
+          installed={[]}
+          pulling={pulling}
+          onPull={doPull}
+        />
+        {error && <div className="error banner">{error}</div>}
+      </div>
+    )
+  }
 
   return (
     <div className="layout">
       <aside className="sidebar">
         <h1>Local Inference</h1>
 
+        <button onClick={() => setActiveId(null)}>New chat</button>
+
+        <ul className="conv-list">
+          {convs.map((c) => (
+            <li
+              key={c.id}
+              className={c.id === activeId ? 'active' : ''}
+              onClick={() => setActiveId(c.id)}
+            >
+              <span className="conv-title">{c.title}</span>
+              <button
+                className="ghost tiny"
+                onClick={(e) => {
+                  e.stopPropagation()
+                  setConvs((cur) => cur.filter((x) => x.id !== c.id))
+                  if (activeId === c.id) setActiveId(null)
+                }}
+              >
+                ✕
+              </button>
+            </li>
+          ))}
+        </ul>
+
         <label className="section-label">Model</label>
         <select value={selectedModel} onChange={(e) => setSelectedModel(e.target.value)}>
-          {models.length === 0 && <option value="">No models installed</option>}
           {models.map((m) => (
             <option key={m.name} value={m.name}>
               {m.name} ({formatBytes(m.size)})
@@ -157,70 +258,67 @@ export default function App() {
           ))}
         </select>
 
-        <label className="section-label">Installed</label>
-        <ul className="model-list">
-          {models.map((m) => (
-            <li key={m.name}>
-              <span title={m.details?.quantization_level}>
-                {m.name}
-                {m.details?.parameter_size ? ` · ${m.details.parameter_size}` : ''}
-              </span>
-              <button className="ghost" onClick={() => removeModel(m.name)}>
-                ✕
-              </button>
-            </li>
-          ))}
-          {models.length === 0 && <li className="muted">Pull a model to get started</li>}
-        </ul>
+        <button className="ghost" onClick={() => setShowPicker(!showPicker)}>
+          {showPicker ? 'Hide models' : 'Get more models'}
+        </button>
 
-        <label className="section-label">Pull a model</label>
-        <div className="pull-row">
-          <input
-            placeholder="e.g. qwen3:30b, llama3.1:8b"
-            value={pullName}
-            onChange={(e) => setPullName(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && doPull()}
-            disabled={!!pull}
-          />
-          <button onClick={doPull} disabled={!!pull || !pullName.trim()}>
-            Pull
-          </button>
-        </div>
-        {pull && (
-          <div className="pull-progress">
-            <div className="muted">
-              {pull.status}
-              {pullPct !== null ? ` — ${pullPct}%` : ''}
+        {showPicker && (
+          <div className="sidebar-picker">
+            <ModelPicker
+              totalMemGB={sysMemGB}
+              installed={models.map((m) => m.name)}
+              pulling={pulling}
+              onPull={doPull}
+            />
+            <div className="pull-row">
+              <input
+                placeholder="Any Ollama model tag…"
+                value={pullName}
+                onChange={(e) => setPullName(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && doPull(pullName.trim())}
+                disabled={!!pulling}
+              />
+              <button onClick={() => doPull(pullName.trim())} disabled={!!pulling || !pullName.trim()}>
+                Pull
+              </button>
             </div>
-            {pullPct !== null && (
-              <div className="bar">
-                <div className="bar-fill" style={{ width: `${pullPct}%` }} />
-              </div>
-            )}
+            <ul className="model-list">
+              {models.map((m) => (
+                <li key={m.name}>
+                  <span>{m.name}</span>
+                  <button className="ghost tiny" onClick={() => removeModel(m.name)}>
+                    ✕
+                  </button>
+                </li>
+              ))}
+            </ul>
           </div>
         )}
-
-        <button className="ghost new-chat" onClick={() => setMessages([])}>
-          New chat
-        </button>
       </aside>
 
       <main className="chat">
         <div className="messages" ref={scrollRef}>
           {messages.length === 0 && (
             <div className="empty-hint">
-              {selectedModel
-                ? `Chatting with ${selectedModel} — everything runs on this machine.`
-                : 'Pull a model from the sidebar to get started.'}
+              <p>Chatting with {selectedModel} — everything stays on this machine.</p>
+              <div className="starters">
+                {STARTERS.map((s) => (
+                  <button key={s} className="ghost" onClick={() => send(s)}>
+                    {s}
+                  </button>
+                ))}
+              </div>
             </div>
           )}
           {messages.map((m, i) => (
-            <div key={i} className={`msg ${m.role}`}>
-              <div className="msg-role">{m.role === 'user' ? 'You' : selectedModel}</div>
-              <div className="msg-content">
-                {m.content || (streaming && i === messages.length - 1 ? '…' : '')}
-              </div>
-            </div>
+            <MessageView
+              key={i}
+              message={m}
+              modelName={active?.model ?? selectedModel}
+              isLast={i === messages.length - 1}
+              streaming={streaming}
+              onRegenerate={regenerate}
+            />
           ))}
         </div>
 
@@ -228,7 +326,7 @@ export default function App() {
 
         <div className="composer">
           <textarea
-            placeholder={selectedModel ? 'Send a message…' : 'No model selected'}
+            placeholder="Send a message…"
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => {
@@ -237,13 +335,13 @@ export default function App() {
                 send()
               }
             }}
-            disabled={!selectedModel}
             rows={3}
+            autoFocus
           />
           {streaming ? (
             <button onClick={() => abortRef.current?.abort()}>Stop</button>
           ) : (
-            <button onClick={send} disabled={!input.trim() || !selectedModel}>
+            <button onClick={() => send()} disabled={!input.trim() || !selectedModel}>
               Send
             </button>
           )}

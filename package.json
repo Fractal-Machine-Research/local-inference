@@ -1,6 +1,6 @@
 {
   "name": "local-model-inference",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Desktop app for running AI model inference locally via Ollama",
   "main": "./out/main/index.js",
   "author": "Zachary Yu",
@@ -9,11 +9,14 @@
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "typecheck": "tsc --noEmit -p tsconfig.node.json --composite false && tsc --noEmit -p tsconfig.web.json --composite false",
-    "dist": "electron-vite build && electron-builder"
+    "fetch-ollama": "node scripts/fetch-ollama.mjs",
+    "dist": "node scripts/fetch-ollama.mjs && electron-vite build && electron-builder"
   },
   "dependencies": {
     "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "react-dom": "^18.3.1",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
@@ -23,13 +26,16 @@
     "electron": "^33.3.1",
     "electron-builder": "^25.1.8",
     "electron-vite": "^2.3.0",
+    "playwright-core": "^1.61.1",
     "typescript": "^5.7.2",
     "vite": "^5.4.11"
   },
   "build": {
     "appId": "com.zacharyyu.localinference",
     "productName": "Local Inference",
-    "files": ["out/**/*"],
+    "files": [
+      "out/**/*"
+    ],
     "directories": {
       "output": "release"
     },
@@ -39,15 +45,39 @@
       "repo": "local-model-inference"
     },
     "mac": {
-      "target": [{ "target": "dmg", "arch": ["arm64", "x64"] }],
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        }
+      ],
       "category": "public.app-category.developer-tools",
-      "identity": null
+      "identity": null,
+      "extraResources": [
+        {
+          "from": "resources/ollama/darwin",
+          "to": "ollama"
+        }
+      ]
     },
     "win": {
-      "target": ["nsis"]
+      "target": [
+        "nsis"
+      ],
+      "extraResources": [
+        {
+          "from": "resources/ollama/win32",
+          "to": "ollama"
+        }
+      ]
     },
     "linux": {
-      "target": ["AppImage"],
+      "target": [
+        "AppImage"
+      ],
       "category": "Development"
     }
   }
