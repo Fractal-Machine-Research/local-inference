@@ -15,7 +15,30 @@ npm install
 npm run dev        # launches Electron with hot reload
 ```
 
-## Packaging
+## Download & install
+
+Grab the latest installer from [Releases](https://github.com/Fractal-Machine-Research/local-model-inference/releases) — `.dmg` for macOS, `.exe` for Windows, `.AppImage` for Linux.
+
+> **macOS note:** the app is not code-signed, so on first launch macOS will say it "can't be opened" or is "damaged." Right-click the app → **Open** → **Open**, or run:
+>
+> ```sh
+> xattr -cr "/Applications/Local Inference.app"
+> ```
+
+You'll also need [Ollama](https://ollama.com/download) installed — the app will prompt you if it's missing.
+
+## Releasing a new version
+
+Releases are automated via GitHub Actions (`.github/workflows/release.yml`). Bump the version and push a tag:
+
+```sh
+npm version patch          # bumps package.json + creates the git tag
+git push && git push --tags
+```
+
+CI builds installers for macOS (arm64 + Intel), Windows, and Linux and attaches them to a GitHub Release. Note: electron-builder creates the release as a **draft** — review it on GitHub and click Publish.
+
+## Packaging locally
 
 ```sh
 npm run dist       # builds a .dmg into release/

@@ -33,9 +33,22 @@
     "directories": {
       "output": "release"
     },
+    "publish": {
+      "provider": "github",
+      "owner": "Fractal-Machine-Research",
+      "repo": "local-model-inference"
+    },
     "mac": {
-      "target": ["dmg"],
-      "category": "public.app-category.developer-tools"
+      "target": [{ "target": "dmg", "arch": ["arm64", "x64"] }],
+      "category": "public.app-category.developer-tools",
+      "identity": null
+    },
+    "win": {
+      "target": ["nsis"]
+    },
+    "linux": {
+      "target": ["AppImage"],
+      "category": "Development"
     }
   }
 }
