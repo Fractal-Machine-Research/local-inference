@@ -118,6 +118,34 @@ select:focus {
   gap: 10px;
 }
 
+.checking-note {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  align-items: center;
+  text-align: center;
+  max-width: 440px;
+}
+
+.checking-note .muted {
+  text-transform: none;
+  letter-spacing: normal;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.suggestions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.suggestions button {
+  text-transform: none;
+  letter-spacing: normal;
+  overflow-wrap: anywhere;
+}
+
 .layout {
   display: flex;
   height: 100vh;

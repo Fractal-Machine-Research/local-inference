@@ -1,7 +1,7 @@
 import { app, shell, BrowserWindow, ipcMain } from 'electron'
 import { join } from 'path'
 import { totalmem } from 'os'
-import { ensureOllama, stopOllama } from './ollama'
+import { ensureEngine, stopEngine, EngineId } from './engine'
 
 function createWindow(): void {
   const win = new BrowserWindow({
@@ -30,7 +30,9 @@ function createWindow(): void {
 }
 
 app.whenReady().then(() => {
-  ipcMain.handle('ollama:ensure', () => ensureOllama())
+  ipcMain.handle('engine:ensure', (_e, engine: EngineId, model?: string) =>
+    ensureEngine(engine, model)
+  )
   ipcMain.handle('open-external', (_e, url: string) => shell.openExternal(url))
   ipcMain.handle('system-info', () => ({
     totalMemGB: Math.round(totalmem() / 2 ** 30),
@@ -50,5 +52,5 @@ app.on('window-all-closed', () => {
 })
 
 app.on('will-quit', () => {
-  stopOllama()
+  stopEngine()
 })

@@ -9,11 +9,21 @@ import {
   pullModel,
   streamChat
 } from './ollama'
-import { Conversation, loadConversations, saveConversations } from './storage'
+import { listModels as oaiListModels, streamChat as oaiStreamChat } from './openai'
+import { ENGINES, ENGINE_IDS, EngineId } from './engines'
+import {
+  Conversation,
+  loadConversations,
+  loadEngine,
+  loadEngineModels,
+  saveConversations,
+  saveEngine,
+  saveEngineModels
+} from './storage'
 import ModelPicker from './components/ModelPicker'
 import MessageView from './components/MessageView'
 
-type AppStatus = 'checking' | 'ready' | 'not-installed' | 'failed-to-start'
+type AppStatus = 'checking' | 'ready' | 'not-installed' | 'failed-to-start' | 'needs-model'
 
 const STARTERS = [
   'Explain how running an AI model locally works',
@@ -21,8 +31,31 @@ const STARTERS = [
   'Help me plan a weekend coding project'
 ]
 
+function EngineSelect({
+  engine,
+  onChange,
+  disabled
+}: {
+  engine: EngineId
+  onChange: (e: EngineId) => void
+  disabled?: boolean
+}) {
+  return (
+    <select value={engine} onChange={(e) => onChange(e.target.value as EngineId)} disabled={disabled}>
+      {ENGINE_IDS.map((id) => (
+        <option key={id} value={id}>
+          {ENGINES[id].label}
+        </option>
+      ))}
+    </select>
+  )
+}
+
 export default function App() {
   const [status, setStatus] = useState<AppStatus>('checking')
+  const [engine, setEngine] = useState<EngineId>(() => loadEngine())
+  const [engineModels, setEngineModels] = useState(() => loadEngineModels())
+  const [baseUrl, setBaseUrl] = useState('')
   const [sysMemGB, setSysMemGB] = useState(16)
   const [models, setModels] = useState<ModelInfo[]>([])
   const [selectedModel, setSelectedModel] = useState('')
@@ -37,13 +70,14 @@ export default function App() {
   const abortRef = useRef<AbortController | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
 
+  const engineDef = ENGINES[engine]
   const active = convs.find((c) => c.id === activeId) ?? null
   const messages = active?.messages ?? []
 
   useEffect(() => saveConversations(convs), [convs])
 
-  const refreshModels = useCallback(async () => {
-    const list = await listModels()
+  const refreshModels = useCallback(async (eng: EngineId, base: string) => {
+    const list = eng === 'ollama' ? await listModels() : await oaiListModels(base)
     setModels(list)
     setSelectedModel((cur) => (cur && list.some((m) => m.name === cur) ? cur : (list[0]?.name ?? '')))
     return list
@@ -52,21 +86,24 @@ export default function App() {
   const connect = useCallback(async () => {
     setStatus('checking')
     setError('')
+    setModels([])
     try {
       const info = await window.api.systemInfo()
       setSysMemGB(info.totalMemGB)
-      const result = await window.api.ensureOllama()
-      if (result === 'running' || result === 'started') {
-        await refreshModels()
+      const result = await window.api.ensureEngine(engine, engineModels[engine])
+      setBaseUrl(result.baseUrl)
+      if (result.status === 'running' || result.status === 'started') {
+        await refreshModels(engine, result.baseUrl)
         setStatus('ready')
       } else {
-        setStatus(result as AppStatus)
+        setStatus(result.status)
+        if (result.error) setError(result.error)
       }
     } catch (e) {
       setStatus('failed-to-start')
       setError(String(e))
     }
-  }, [refreshModels])
+  }, [engine, engineModels, refreshModels])
 
   useEffect(() => {
     connect()
@@ -75,6 +112,26 @@ export default function App() {
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight })
   }, [convs, streaming])
+
+  function switchEngine(id: EngineId) {
+    if (id === engine) return
+    abortRef.current?.abort()
+    saveEngine(id)
+    setEngine(id)
+    setShowPicker(false)
+    setPullName('')
+  }
+
+  // For llama.cpp / vLLM: remember which model to serve, which restarts the
+  // server with it (via connect re-running).
+  function loadEngineModel(model: string) {
+    if (!model) return
+    const next = { ...engineModels, [engine]: model }
+    saveEngineModels(next)
+    setEngineModels(next)
+    setShowPicker(false)
+    setPullName('')
+  }
 
   function updateConv(id: string, update: (c: Conversation) => Conversation) {
     setConvs((cur) => cur.map((c) => (c.id === id ? update(c) : c)))
@@ -90,14 +147,19 @@ export default function App() {
     setError('')
     const controller = new AbortController()
     abortRef.current = controller
+    const onStats = (stats: { tokensPerSec: number; tokens: number }) => {
+      updateConv(convId, (c) => {
+        const msgs = [...c.messages]
+        msgs[msgs.length - 1] = { ...msgs[msgs.length - 1], stats }
+        return { ...c, messages: msgs }
+      })
+    }
+    const stream =
+      engine === 'ollama'
+        ? streamChat(model, history, controller.signal, onStats)
+        : oaiStreamChat(baseUrl, model, history, controller.signal, onStats)
     try {
-      for await (const token of streamChat(model, history, controller.signal, (stats) => {
-        updateConv(convId, (c) => {
-          const msgs = [...c.messages]
-          msgs[msgs.length - 1] = { ...msgs[msgs.length - 1], stats }
-          return { ...c, messages: msgs }
-        })
-      })) {
+      for await (const token of stream) {
         updateConv(convId, (c) => {
           const msgs = [...c.messages]
           const last = msgs[msgs.length - 1]
@@ -154,7 +216,7 @@ export default function App() {
       for await (const progress of pullModel(tag, controller.signal)) {
         setPulling({ tag, progress })
       }
-      const list = await refreshModels()
+      const list = await refreshModels(engine, baseUrl)
       const pulled = list.find((m) => m.name.startsWith(tag))
       if (pulled) setSelectedModel(pulled.name)
       setPullName('')
@@ -169,39 +231,83 @@ export default function App() {
     if (!confirm(`Delete ${name} from disk?`)) return
     try {
       await deleteModel(name)
-      await refreshModels()
+      await refreshModels(engine, baseUrl)
     } catch (e) {
       setError(String(e))
     }
   }
 
   if (status === 'checking') {
-    return <div className="center-screen">Starting local AI engine…</div>
+    return (
+      <div className="center-screen">
+        <div className="checking-note">
+          <div>Starting {engineDef.label}…</div>
+          {engine !== 'ollama' && engineModels[engine] && (
+            <div className="muted">
+              Loading {engineModels[engine]} — the first run downloads the model and can take a
+              while.
+            </div>
+          )}
+        </div>
+      </div>
+    )
   }
 
   if (status === 'not-installed' || status === 'failed-to-start') {
     return (
       <div className="center-screen">
         <div className="setup-card">
-          <h2>Couldn&apos;t start the AI engine</h2>
-          <p>
-            The bundled engine failed to launch. Installing Ollama separately also works — the
-            app will find it.
-          </p>
+          <h2>Couldn&apos;t start {engineDef.label}</h2>
+          <p>{engineDef.installHint}</p>
           {error && <p className="error">{error}</p>}
           <div className="row">
-            <button onClick={() => window.api.openExternal('https://ollama.com/download')}>
-              Get Ollama
+            <button onClick={() => window.api.openExternal(engineDef.installUrl)}>
+              Get {engineDef.label}
             </button>
             <button onClick={connect}>Retry</button>
           </div>
+          <label className="section-label">Or use a different engine</label>
+          <EngineSelect engine={engine} onChange={switchEngine} />
         </div>
       </div>
     )
   }
 
-  // First run: engine is up but no models yet — one guided decision.
-  if (models.length === 0) {
+  // llama.cpp / vLLM serve one model chosen at launch — ask for it once.
+  if (status === 'needs-model') {
+    return (
+      <div className="center-screen">
+        <div className="setup-card">
+          <h2>Choose a model for {engineDef.label}</h2>
+          <p>{engineDef.modelHint}</p>
+          <div className="row">
+            <input
+              placeholder={engineDef.modelPlaceholder}
+              value={pullName}
+              onChange={(e) => setPullName(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && loadEngineModel(pullName.trim())}
+              autoFocus
+            />
+            <button onClick={() => loadEngineModel(pullName.trim())} disabled={!pullName.trim()}>
+              Load
+            </button>
+          </div>
+          <div className="suggestions">
+            {engineDef.suggestions?.map((s) => (
+              <button key={s} className="ghost" onClick={() => loadEngineModel(s)}>
+                {s}
+              </button>
+            ))}
+          </div>
+          <label className="section-label">Or use a different engine</label>
+          <EngineSelect engine={engine} onChange={switchEngine} />
+        </div>
+      </div>
+    )
+  }
+
+  // First run on Ollama: engine is up but no models yet — one guided decision.
+  if (engine === 'ollama' && models.length === 0) {
     return (
       <div className="onboarding">
         <h1>Pick a model to get started</h1>
@@ -249,20 +355,23 @@ export default function App() {
           ))}
         </ul>
 
+        <label className="section-label">Engine</label>
+        <EngineSelect engine={engine} onChange={switchEngine} disabled={streaming || !!pulling} />
+
         <label className="section-label">Model</label>
         <select value={selectedModel} onChange={(e) => setSelectedModel(e.target.value)}>
           {models.map((m) => (
             <option key={m.name} value={m.name}>
-              {m.name} ({formatBytes(m.size)})
+              {m.size > 0 ? `${m.name} (${formatBytes(m.size)})` : m.name}
             </option>
           ))}
         </select>
 
         <button className="ghost" onClick={() => setShowPicker(!showPicker)}>
-          {showPicker ? 'Hide models' : 'Get more models'}
+          {showPicker ? 'Hide models' : engineDef.managedModels ? 'Get more models' : 'Change model'}
         </button>
 
-        {showPicker && (
+        {showPicker && engineDef.managedModels && (
           <div className="sidebar-picker">
             <ModelPicker
               totalMemGB={sysMemGB}
@@ -294,13 +403,47 @@ export default function App() {
             </ul>
           </div>
         )}
+
+        {showPicker && !engineDef.managedModels && (
+          <div className="sidebar-picker">
+            <p className="muted">
+              {engineDef.label} serves one model at a time — loading a new one restarts the
+              server.
+            </p>
+            <div className="pull-row">
+              <input
+                placeholder={engineDef.modelPlaceholder}
+                value={pullName}
+                onChange={(e) => setPullName(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && loadEngineModel(pullName.trim())}
+                disabled={streaming}
+              />
+              <button
+                onClick={() => loadEngineModel(pullName.trim())}
+                disabled={streaming || !pullName.trim()}
+              >
+                Load
+              </button>
+            </div>
+            <div className="suggestions">
+              {engineDef.suggestions?.map((s) => (
+                <button key={s} className="ghost tiny" onClick={() => loadEngineModel(s)}>
+                  {s}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
       </aside>
 
       <main className="chat">
         <div className="messages" ref={scrollRef}>
           {messages.length === 0 && (
             <div className="empty-hint">
-              <p>Chatting with {selectedModel} — everything stays on this machine.</p>
+              <p>
+                Chatting with {selectedModel} via {engineDef.label} — everything stays on this
+                machine.
+              </p>
               <div className="starters">
                 {STARTERS.map((s) => (
                   <button key={s} className="ghost" onClick={() => send(s)}>
